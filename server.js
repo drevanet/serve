@@ -1,28 +1,4 @@
-const express = require('express');
-const http = require('http');
-const https = require('https');
-const readline = require('readline');
-const { URL } = require('url');
-
-const app = express();
-const PORT = process.env.PORT || 5000;
-
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 200 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 200 });
-
-app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
-    next();
-});
-
-function resolveUrl(baseUrl, relativeUrl) {
-    if (relativeUrl.startsWith('http://') || relativeUrl.startsWith('https://')) {
-        return relativeUrl;
-    }
-    return new URL(relativeUrl, baseUrl).href;
-}
+const zlib = require('zlib');
 
 app.get('/proxy', (req, res) => {
     const { url, referer } = req.query;
@@ -33,6 +9,12 @@ app.get('/proxy', (req, res) => {
     const proxyHost = `${req.protocol}://${req.get('host')}/proxy`;
     const encodedReferer = referer ? encodeURIComponent(referer) : '';
 
+    // If it's a TS video segment, redirect React Player directly to the source
+    // This bypasses your Node server completely for heavy video files
+    if (!isM3U8 && (url.includes('.ts') || url.includes('.mp4'))) {
+        return res.redirect(302, url);
+    }
+
     const options = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
@@ -41,7 +23,8 @@ app.get('/proxy', (req, res) => {
         headers: {
             'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
             'Referer': referer || '',
-            'Origin': referer ? new URL(referer).origin : ''
+            'Origin': referer ? new URL(referer).origin : '',
+            'Accept-Encoding': 'gzip, deflate' // Ask source for compression
         },
         agent: parsedUrl.protocol === 'https:' ? httpsAgent : httpAgent,
         timeout: 5000
@@ -50,40 +33,51 @@ app.get('/proxy', (req, res) => {
     const lib = parsedUrl.protocol === 'https:' ? https : http;
 
     const proxyReq = lib.request(options, (proxyRes) => {
+        // Handle decompression if target server sent compressed content
+        let stream = proxyRes;
+        const contentEncoding = proxyRes.headers['content-encoding'];
+        if (contentEncoding === 'gzip') {
+            stream = proxyRes.pipe(zlib.createGunzip());
+        } else if (contentEncoding === 'deflate') {
+            stream = proxyRes.pipe(zlib.createInflate());
+        }
+
         if (isM3U8) {
             res.setHeader('Content-Type', 'application/x-mpegURL');
             res.setHeader('Cache-Control', 'public, max-age=2');
+            res.setHeader('Content-Encoding', 'gzip'); // Compress response back to client
 
-            const rl = readline.createInterface({
-                input: proxyRes,
-                crlfDelay: Infinity
-            });
+            let body = '';
+            stream.on('data', chunk => { body += chunk; });
+            stream.on('end', () => {
+                // Bulk rewrite via regex instead of sluggish line-by-line loops
+                let updatedBody = body.replace(/URI=["']([^"']+)["']/g, (_, p1) => {
+                    const abs = resolveUrl(url, p1);
+                    return `URI="${proxyHost}?url=${encodeURIComponent(abs)}&referer=${encodedReferer}"`;
+                });
 
-            rl.on('line', (line) => {
-                const trimmed = line.trim();
-                if (!trimmed) return;
-
-                if (trimmed[0] === '#') {
-                    if (trimmed.includes('URI=')) {
-                        const updated = trimmed.replace(/URI=["']([^"']+)["']/g, (_, p1) => {
-                            const abs = resolveUrl(url, p1);
-                            return `URI="${proxyHost}?url=${encodeURIComponent(abs)}&referer=${encodedReferer}"`;
-                        });
-                        res.write(updated + '\n');
-                    } else {
-                        res.write(trimmed + '\n');
-                    }
-                } else {
+                // Rewrite URLs that don't start with '#' (the actual video/playlist links)
+                updatedBody = updatedBody.split('\n').map(line => {
+                    const trimmed = line.trim();
+                    if (!trimmed || trimmed.startsWith('#')) return line;
                     const abs = resolveUrl(url, trimmed);
-                    res.write(`${proxyHost}?url=${encodeURIComponent(abs)}&referer=${encodedReferer}\n`);
-                }
-            });
+                    return `${proxyHost}?url=${encodeURIComponent(abs)}&referer=${encodedReferer}`;
+                }).join('\n');
 
-            rl.on('close', () => res.end());
+                // Zip manifest instantly before delivery
+                zlib.gzip(updatedBody, (err, compressed) => {
+                    if (err) {
+                        if (!res.headersSent) res.status(500).send(err.message);
+                        return;
+                    }
+                    res.end(compressed);
+                });
+            });
         } else {
+            // Fallback safety for non-redirected files
             res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'video/MP2T');
             res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
-            proxyRes.pipe(res);
+            stream.pipe(res);
         }
     });
 
@@ -94,5 +88,3 @@ app.get('/proxy', (req, res) => {
     req.on('close', () => proxyReq.destroy());
     proxyReq.end();
 });
-
-app.listen(PORT, () => console.log(`Fast proxy running on port ${PORT}`));
