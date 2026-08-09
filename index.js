@@ -50,7 +50,7 @@ function resolveUrl(baseUrl, relativeUrl) {
 }
 
 app.get('/proxy', (req, res) => {
-    const { url, referer } = req.query;
+    const { url, referrer } = req.query;
     if (!url) return res.status(400).send('Missing url parameter');
 
     let parsedUrl;
@@ -72,7 +72,7 @@ app.get('/proxy', (req, res) => {
     }
 
     const proxyHost = `${req.protocol}://${req.get('host')}/proxy`;
-    const encodedReferer = referer ? encodeURIComponent(referer) : '';
+    const encodedReferer = referrer ? encodeURIComponent(referrer) : '';
 
     const options = {
         hostname: parsedUrl.hostname,
@@ -81,8 +81,8 @@ app.get('/proxy', (req, res) => {
         method: 'GET',
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': referer || '',
-            'Origin': referer ? new URL(referer).origin : '',
+            'Referrer': referrer || '',
+            'Origin': referrer ? new URL(referrer).origin : '',
             'Accept': '*/*',
             'Connection': 'keep-alive'
         },
