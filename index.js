@@ -4,7 +4,7 @@ const https = require('https');
 const { URL } = require('url');
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
 // Increase socket pool for heavy concurrent streaming
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 500, maxFreeSockets: 100 });
